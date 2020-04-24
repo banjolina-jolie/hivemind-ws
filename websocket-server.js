@@ -6,7 +6,7 @@ if (process.env.REDIS_URL) {
   console.log('~~~~~~~~~~~~~~REDIS_URL~~~~~~~~~~~~~~~~~');
   redisClientOptions.url = process.env.REDIS_URL;
 }
-const redisClient = redis.createClient();
+const redisClient = redis.createClient(redisClientOptions);
 const qs = require('querystring');
 
 function buffToString(buf) {
