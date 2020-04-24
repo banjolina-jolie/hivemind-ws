@@ -1,4 +1,11 @@
 const redis = require("redis");
+const redisClientOptions = {};
+if (process.env.REDIS_URL) {
+  console.log('~~~~~~~~~~~~~~REDIS_URL~~~~~~~~~~~~~~~~~');
+  console.log('~~~~~~~~~~~~~~REDIS_URL~~~~~~~~~~~~~~~~~');
+  console.log('~~~~~~~~~~~~~~REDIS_URL~~~~~~~~~~~~~~~~~');
+  redisClientOptions.url = process.env.REDIS_URL;
+}
 const redisClient = redis.createClient();
 const qs = require('querystring');
 
