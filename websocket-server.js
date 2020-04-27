@@ -26,6 +26,7 @@ function stringToBuff(str) {
 require('uWebSockets.js').App().ws('/*', {
 
   open: (ws, req) => {
+    console.log('~~~~~~~~~~OPEN~~~~~~~~~~~~')
     // console.log('ws')
     // for (var key in ws) {
     //   console.log(key)
