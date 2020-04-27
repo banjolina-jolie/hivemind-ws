@@ -23,10 +23,7 @@ function stringToBuff(str) {
 }
 
 
-require('uWebSockets.js').SSLApp({
-  key_file_name: 'key.pem',
-  cert_file_name: 'cert.pem',
-}).ws('/*', {
+require('uWebSockets.js').App().ws('/*', {
 
   open: (ws, req) => {
     // console.log('ws')
