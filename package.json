@@ -2,11 +2,13 @@
   "name": "hivemind-backend",
   "version": "1.0.0",
   "description": "",
+  "main": "websocket-server.js",
   "author": "",
   "license": "ISC",
   "dependencies": {
     "redis": "^3.0.2",
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v17.3.0"
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v17.3.0",
+    "ws": "^7.2.5"
   },
   "scripts": {
     "start": "node websocket-server.js"
