@@ -17,6 +17,7 @@ const redisClient = redis.createClient(redisClientOptions);
 const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
 const questionSubscribers = {};
+const wsByIP = {}; // TODO: use this instead of questionSubscribers
 
 function handleOnConnection(ws, params) {
   if (params.question) {
@@ -25,15 +26,19 @@ function handleOnConnection(ws, params) {
 
   if (params.start) {
     console.log('~~~~~~~~~~~START VOTING~~~~~~~~~~~~~');
-    console.log(params.voting_round_end_time);
     questionSubscribers[params.question].forEach(ws => {
       ws.send(JSON.stringify({ start: true, votingRoundEndTime: params.voting_round_end_time}));
     });
   } else if (params.vote_next_word) {
     console.log('~~~~~~~~~~~NEXT VOTING ROUND~~~~~~~~~~~~~');
-    console.log(params.voting_round_end_time);
-    questionSubscribers[params.question].forEach(ws => {
-      ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
+    // filter subscribers list
+    questionSubscribers[params.question] = questionSubscribers[params.question].filter(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
+        return true;
+      } else {
+        return ws.readyState === WebSocket.CONNECTING;
+      }
     });
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
@@ -47,18 +52,22 @@ function handleOnConnection(ws, params) {
   }
 }
 
-wss.on('connection', function connection(ws, params) {
+wss.on('connection', function connection(ws, req) {
+  const ip = req.socket.remoteAddress;
+  wsByIP[ip] = ws;
 
+  const params = qs.parse(req.url.slice(2));
   handleOnConnection(ws, params);
 
   ws.on('message', function incoming(data) {
     handleNewVoteMessage(ws, data)
-    // wss.clients.forEach(function each(client) {
-    //   if (client.readyState === WebSocket.OPEN) {
-    //     client.send(data);
-    //   }
-    // });
   });
+
+  ws.on('close', (ip => {
+    return function onClose() {
+      delete wsByIP[ip];
+    }
+  })(ip));
 });
 
 function authenticate(params, cb) {
@@ -77,7 +86,7 @@ server.on('upgrade', function upgrade(request, socket, head) {
     }
 
     wss.handleUpgrade(request, socket, head, function done(ws) {
-      wss.emit('connection', ws, qsParams);
+      wss.emit('connection', ws, request);
     });
   });
 });
@@ -85,8 +94,6 @@ server.on('upgrade', function upgrade(request, socket, head) {
 server.listen(PORT);
 
 function handleNewVoteMessage(ws, strMsg) {
-  console.log('strMsg');
-  console.log(strMsg);
   const [player, word, questionId] = strMsg.split(' ');
 
   if (!player || !questionId) { return }
