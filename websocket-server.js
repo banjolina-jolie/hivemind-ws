@@ -17,7 +17,8 @@ const redisClient = redis.createClient(redisClientOptions);
 const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
 const questionSubscribers = {};
-const wsByIP = {}; // TODO: use this instead of questionSubscribers
+const voterWsByIP = {}; // TODO: use this instead of questionSubscribers
+const audienceWsByIP = {}; // TODO: use this instead of questionSubscribers
 
 function handleOnConnection(ws, params) {
   if (params.question) {
@@ -42,6 +43,8 @@ function handleOnConnection(ws, params) {
     });
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
+    console.log('params.question')
+    console.log(params.question)
     questionSubscribers[params.question].push(ws);
     const setName = `${params.question}-scores`;
 
@@ -54,7 +57,7 @@ function handleOnConnection(ws, params) {
 
 wss.on('connection', function connection(ws, req) {
   const ip = req.socket.remoteAddress;
-  wsByIP[ip] = ws;
+  voterWsByIP[ip] = ws;
 
   const params = qs.parse(req.url.slice(2));
   handleOnConnection(ws, params);
@@ -65,30 +68,30 @@ wss.on('connection', function connection(ws, req) {
 
   ws.on('close', (ip => {
     return function onClose() {
-      delete wsByIP[ip];
+      delete voterWsByIP[ip];
     }
   })(ip));
 });
 
-function authenticate(params, cb) {
-  cb(null);
-}
+// function authenticate(params, cb) {
+//   cb(null);
+// }
 
 server.on('upgrade', function upgrade(request, socket, head) {
   // This function is not defined on purpose. Implement it with your own logic.
   const qsParams = qs.parse(request.url.slice(2));
 
-  authenticate(qsParams, err => {
-    if (err) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+  // authenticate(qsParams, err => {
+    // if (err) {
+    //   socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    //   socket.destroy();
+    //   return;
+    // }
 
     wss.handleUpgrade(request, socket, head, function done(ws) {
       wss.emit('connection', ws, request);
     });
-  });
+  // });
 });
 
 server.listen(PORT);
@@ -139,8 +142,12 @@ function handleNewVoteMessage(ws, strMsg) {
 
   function getScoresAndPublish() {
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
-      if (err) console.log(err);
+      if (err) { console.log(err) }
+
       (questionSubscribers[questionId] || []).forEach(ws => {
+        // ws.send(JSON.stringify({
+        //   scores
+        // }));
         ws.send(JSON.stringify(scores));
       });
     });
