@@ -16,61 +16,120 @@ const redisClient = redis.createClient(redisClientOptions);
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
-const questionSubscribers = {};
-const voterWsByIP = {}; // TODO: use this instead of questionSubscribers
-const audienceWsByIP = {}; // TODO: use this instead of questionSubscribers
 
-function handleOnConnection(ws, params) {
+// Development
+const questionSubscribers = {};
+
+
+const voterWsByIP = {};
+/*
+  voterWsByIP = {
+    <QUESTION_ID>: {
+      <IP>: <WS>
+    }
+  }
+*/
+const audienceWsByIP = {}; // TODO: use this for non authenticated users
+
+function handleOnConnection(ws, ip, params) {
   if (params.question) {
+    voterWsByIP[params.question] = voterWsByIP[params.question] || {};
+
     questionSubscribers[params.question] = questionSubscribers[params.question] || [];
   }
 
   if (params.start) {
     console.log('~~~~~~~~~~~START VOTING~~~~~~~~~~~~~');
-    questionSubscribers[params.question].forEach(ws => {
-      ws.send(JSON.stringify({ start: true, votingRoundEndTime: params.voting_round_end_time}));
-    });
+
+    if (isProduction) {
+      Object.values(voterWsByIP[params.question]).forEach(ws => {
+        ws.send(JSON.stringify({
+          start: true,
+          votingRoundEndTime: params.voting_round_end_time,
+        }));
+      });
+    } else {
+      // DEVELOPMENT
+      questionSubscribers[params.question].forEach(ws => {
+        ws.send(JSON.stringify({
+          start: true,
+          votingRoundEndTime: params.voting_round_end_time,
+        }));
+      })
+    }
+
+
   } else if (params.vote_next_word) {
     console.log('~~~~~~~~~~~NEXT VOTING ROUND~~~~~~~~~~~~~');
-    // filter subscribers list
-    questionSubscribers[params.question] = questionSubscribers[params.question].filter(ws => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
-        return true;
-      } else {
-        return ws.readyState === WebSocket.CONNECTING;
-      }
-    });
+
+    if (isProduction) {
+      Object.values(voterWsByIP[params.question]).forEach(ws => {
+        ws.send(JSON.stringify({
+          winningWord: params.winning_word,
+          votingRoundEndTime: params.voting_round_end_time,
+        }));
+      });
+    } else {
+      // DEVELOPMENT
+      questionSubscribers[params.question] = questionSubscribers[params.question].filter(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
+          return true;
+        } else {
+          return ws.readyState === WebSocket.CONNECTING;
+        }
+      });
+    }
+
+    if (params.winning_word === '(complete-answer)') {
+      // delete voterWsByIP[params.question] // TODO: ?
+    }
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
-    console.log('params.question')
-    console.log(params.question)
-    questionSubscribers[params.question].push(ws);
-    const setName = `${params.question}-scores`;
 
+    if (isProduction) {
+      voterWsByIP[params.question][ip] = ws;
+    } else {
+      // DEVELOPMENT
+      questionSubscribers[params.question].push(ws);
+    }
+
+    const activeHiveCount = isProduction ? Object.values(voterWsByIP[params.question] || {}).length : (questionSubscribers[params.question] || []).length;
+
+    const setName = `${params.question}-scores`;
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
       if (err) console.log(err);
-      ws.send(JSON.stringify(scores));
+      ws.send(JSON.stringify({
+        activeHiveCount,
+        scores,
+      }));
     });
   }
 }
 
 wss.on('connection', function connection(ws, req) {
   const ip = req.socket.remoteAddress;
-  voterWsByIP[ip] = ws;
-
   const params = qs.parse(req.url.slice(2));
-  handleOnConnection(ws, params);
+  handleOnConnection(ws, ip, params);
 
   ws.on('message', function incoming(data) {
     handleNewVoteMessage(ws, data)
   });
 
-  ws.on('close', (ip => {
-    return function onClose() {
-      delete voterWsByIP[ip];
-    }
-  })(ip));
+  if (params.question) {
+    ws.on('close', (ip => {
+      return function onClose() {
+        if (voterWsByIP[params.question]) {
+          // remove ws from memory
+          delete voterWsByIP[params.question][ip];
+          if (!Object.keys(voterWsByIP[params.question]).length) {
+            // delete empty voterWsByIP[params.question]
+            delete voterWsByIP[params.question];
+          }
+        }
+      }
+    })(ip));
+  }
 });
 
 // function authenticate(params, cb) {
@@ -144,12 +203,16 @@ function handleNewVoteMessage(ws, strMsg) {
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
       if (err) { console.log(err) }
 
-      (questionSubscribers[questionId] || []).forEach(ws => {
-        // ws.send(JSON.stringify({
-        //   scores
-        // }));
-        ws.send(JSON.stringify(scores));
+      const websockets = isProduction ? Object.values(voterWsByIP[questionId] || {}) : questionSubscribers[questionId];
+      const activeHiveCount = (websockets || []).length;
+
+      (websockets || []).forEach(ws => {
+        ws.send(JSON.stringify({
+          activeHiveCount,
+          scores,
+        }));
       });
+
     });
   }
 }
