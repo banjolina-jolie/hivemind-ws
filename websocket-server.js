@@ -50,7 +50,7 @@ function handleOnConnection(ws, ip, params) {
       });
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question].forEach(ws => {
+      questionSubscribers[params.question].forEach(({ ws }) => {
         ws.send(JSON.stringify({
           start: true,
           votingRoundEndTime: params.voting_round_end_time,
@@ -71,7 +71,7 @@ function handleOnConnection(ws, ip, params) {
       });
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question] = questionSubscribers[params.question].filter(ws => {
+      questionSubscribers[params.question].forEach(({ ws }) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
           return true;
@@ -82,8 +82,9 @@ function handleOnConnection(ws, ip, params) {
     }
 
     if (params.winning_word === '(complete-answer)') {
-      // delete voterWsByIP[params.question] // TODO: ?
+      // delete voterWsByIP[params.question] // TODO: Clear question?
     }
+
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
 
@@ -91,10 +92,11 @@ function handleOnConnection(ws, ip, params) {
       voterWsByIP[params.question][ip] = ws;
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question].push(ws);
+      questionSubscribers[params.question].push({ ws, ip });
     }
 
-    const activeHiveCount = isProduction ? Object.values(voterWsByIP[params.question] || {}).length : (questionSubscribers[params.question] || []).length;
+    let activeHive = isProduction ? Object.values(voterWsByIP[params.question] || {}) : (questionSubscribers[params.question] || []).map(x => x.ws);
+    const activeHiveCount = activeHive.filter(ws => ws && ws.readyState === WebSocket.OPEN).length;
 
     const setName = `${params.question}-scores`;
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
@@ -127,6 +129,10 @@ wss.on('connection', function connection(ws, req) {
             delete voterWsByIP[params.question];
           }
         }
+
+        // if (questionSubscribers[params.question]) {
+        //   questionSubscribers[params.question] = questionSubscribers[params.question].filter(x => x.ip !== ip);
+        // }
       }
     })(ip));
   }
@@ -203,7 +209,7 @@ function handleNewVoteMessage(ws, strMsg) {
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
       if (err) { console.log(err) }
 
-      const websockets = isProduction ? Object.values(voterWsByIP[questionId] || {}) : questionSubscribers[questionId];
+      const websockets = isProduction ? Object.values(voterWsByIP[questionId] || {}) : questionSubscribers[questionId].map(x => x.ws);
       const activeHiveCount = (websockets || []).length;
 
       (websockets || []).forEach(ws => {
