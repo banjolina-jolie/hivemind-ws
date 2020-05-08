@@ -2,6 +2,8 @@ const http = require('http');
 const qs = require('querystring');
 const redis = require('redis');
 const WebSocket = require('ws');
+const jwt = require('jsonwebtoken');
+const _ = require('lodash');
 
 const PORT = process.env.PORT || 9001;
 
@@ -18,12 +20,12 @@ const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
 
 // Development
-const questionSubscribers = {};
+const authVoters = {};
 
 
-const voterWsByIP = {};
+const authVotersByIP = {};
 /*
-  voterWsByIP = {
+  authVotersByIP = {
     <QUESTION_ID>: {
       <IP>: <WS>
     }
@@ -31,18 +33,42 @@ const voterWsByIP = {};
 */
 const audienceWsByIP = {}; // TODO: use this for non authenticated users
 
-function handleOnConnection(ws, ip, params) {
-  if (params.question) {
-    voterWsByIP[params.question] = voterWsByIP[params.question] || {};
 
-    questionSubscribers[params.question] = questionSubscribers[params.question] || [];
+function onAuthenticated(ws, ip, params) {
+
+}
+
+function onNotAuthenticated(ws, ip, params) {
+
+}
+
+function handleOnConnection(ws, ip, params) {
+
+  // if (params.auth) {
+  //   jwt.verify(params.auth, process.env.JWT_SECRET, (err, decoded) => {
+  //     if (err) {
+  //       console.log(err);
+  //       ws.send('invalid auth');
+  //     } else {
+  //       onAuthenticated(ws, ip, params);
+  //     }
+  //   });
+  // } else {
+  //   onNotAuthenticated(ws, ip, params);
+  // }
+
+
+  if (params.question) {
+    if (isProduction) {
+      authVotersByIP[params.question] = authVotersByIP[params.question] || {};
+    } else {
+      authVoters[params.question] = authVoters[params.question] || [];
+    }
   }
 
   if (params.start) {
-    console.log('~~~~~~~~~~~START VOTING~~~~~~~~~~~~~');
-
     if (isProduction) {
-      Object.values(voterWsByIP[params.question]).forEach(ws => {
+      Object.values(authVotersByIP[params.question]).forEach(ws => {
         ws.send(JSON.stringify({
           start: true,
           votingRoundEndTime: params.voting_round_end_time,
@@ -50,7 +76,7 @@ function handleOnConnection(ws, ip, params) {
       });
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question].forEach(({ ws }) => {
+      authVoters[params.question].forEach(({ ws }) => {
         ws.send(JSON.stringify({
           start: true,
           votingRoundEndTime: params.voting_round_end_time,
@@ -58,12 +84,11 @@ function handleOnConnection(ws, ip, params) {
       })
     }
 
-
   } else if (params.vote_next_word) {
     console.log('~~~~~~~~~~~NEXT VOTING ROUND~~~~~~~~~~~~~');
 
     if (isProduction) {
-      Object.values(voterWsByIP[params.question]).forEach(ws => {
+      Object.values(authVotersByIP[params.question]).forEach(ws => {
         ws.send(JSON.stringify({
           winningWord: params.winning_word,
           votingRoundEndTime: params.voting_round_end_time,
@@ -71,7 +96,7 @@ function handleOnConnection(ws, ip, params) {
       });
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question].forEach(({ ws }) => {
+      authVoters[params.question].forEach(({ ws }) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
           return true;
@@ -82,20 +107,20 @@ function handleOnConnection(ws, ip, params) {
     }
 
     if (params.winning_word === '(complete-answer)') {
-      // delete voterWsByIP[params.question] // TODO: Clear question?
+      // delete authVotersByIP[params.question] // TODO: Clear question?
     }
 
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
 
     if (isProduction) {
-      voterWsByIP[params.question][ip] = ws;
+      authVotersByIP[params.question][ip] = ws; // use user id?
     } else {
       // DEVELOPMENT
-      questionSubscribers[params.question].push({ ws, ip });
+      authVoters[params.question].push({ ws, ip });
     }
 
-    let activeHive = isProduction ? Object.values(voterWsByIP[params.question] || {}) : (questionSubscribers[params.question] || []).map(x => x.ws);
+    let activeHive = isProduction ? Object.values(authVotersByIP[params.question] || {}) : (authVoters[params.question] || []).map(x => x.ws);
     const activeHiveCount = activeHive.filter(ws => ws && ws.readyState === WebSocket.OPEN).length;
 
     const setName = `${params.question}-scores`;
@@ -112,26 +137,40 @@ function handleOnConnection(ws, ip, params) {
 wss.on('connection', function connection(ws, req) {
   const ip = req.socket.remoteAddress;
   const params = qs.parse(req.url.slice(2));
+
+  if (params.auth) {
+    jwt.verify(params.auth, process.env.JWT_SECRET, (err, decoded) => {
+      if (err) {
+        console.log(err);
+        ws.send('invalid auth');
+      } else {
+        onAuthenticated(ws, ip, params);
+        ws.on('message', function incoming(data) {
+          handleNewVoteMessage(ws, data)
+        });
+      }
+    });
+  } else {
+    onNotAuthenticated(ws, ip, params);
+  }
+
   handleOnConnection(ws, ip, params);
 
-  ws.on('message', function incoming(data) {
-    handleNewVoteMessage(ws, data)
-  });
 
   if (params.question) {
     ws.on('close', (ip => {
       return function onClose() {
-        if (voterWsByIP[params.question]) {
+        if (authVotersByIP[params.question]) {
           // remove ws from memory
-          delete voterWsByIP[params.question][ip];
-          if (!Object.keys(voterWsByIP[params.question]).length) {
-            // delete empty voterWsByIP[params.question]
-            delete voterWsByIP[params.question];
+          delete authVotersByIP[params.question][ip];
+          if (!Object.keys(authVotersByIP[params.question]).length) {
+            // delete empty list
+            delete authVotersByIP[params.question];
           }
         }
 
-        // if (questionSubscribers[params.question]) {
-        //   questionSubscribers[params.question] = questionSubscribers[params.question].filter(x => x.ip !== ip);
+        // if (authVoters[params.question]) {
+        //   authVoters[params.question] = authVoters[params.question].filter(x => x.ip !== ip);
         // }
       }
     })(ip));
@@ -190,6 +229,8 @@ function handleNewVoteMessage(ws, strMsg) {
     }
   }
 
+  const throttledScoreBroadcast = _.throttle(getScoresAndPublish, 250);
+
   function incNewVote() {
     if (word && word !== '<BLANK_VOTE>') {
       console.log(`incrementing ${word}`)
@@ -197,19 +238,19 @@ function handleNewVoteMessage(ws, strMsg) {
     } else {
       console.log(`blank vote deleting player`)
       redisClient.del(playerChoiceKey);
-      getScoresAndPublish();
+      throttledScoreBroadcast();
     }
   }
 
   function setNewVote() {
-    redisClient.set(`${questionId}-${player}`, word, getScoresAndPublish);
+    redisClient.set(`${questionId}-${player}`, word, throttledScoreBroadcast);
   }
 
   function getScoresAndPublish() {
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
       if (err) { console.log(err) }
 
-      const websockets = isProduction ? Object.values(voterWsByIP[questionId] || {}) : questionSubscribers[questionId].map(x => x.ws);
+      const websockets = isProduction ? Object.values(authVotersByIP[questionId] || {}) : authVoters[questionId].map(x => x.ws);
       const activeHiveCount = (websockets || []).length;
 
       (websockets || []).forEach(ws => {
