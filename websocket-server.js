@@ -5,15 +5,16 @@ const WebSocket = require('ws');
 const jwt = require('jsonwebtoken');
 const _ = require('lodash');
 
+// const isProduction = process.env.NODE_ENV === 'production';
+const isProduction = false;
 const PORT = process.env.PORT || 9001;
+// Should be equal to value of `Rails.application.secrets.secret_key_base` from hivemind-rails
+const JWT_SECRET = process.env.JWT_SECRET;
 
 const redisClientOptions = {};
 if (process.env.REDIS_URL) {
   redisClientOptions.url = process.env.REDIS_URL;
 }
-
-const isProduction = process.env.NODE_ENV === 'production';
-
 const redisClient = redis.createClient(redisClientOptions);
 
 const server = http.createServer();
@@ -21,7 +22,6 @@ const wss = new WebSocket.Server({ noServer: true });
 
 // Development
 const authVoters = {};
-
 
 const authVotersByIP = {};
 /*
@@ -31,74 +31,33 @@ const authVotersByIP = {};
     }
   }
 */
-const audienceWsByIP = {}; // TODO: use this for non authenticated users
-
-
-function onAuthenticated(ws, ip, params) {
-
-}
-
-function onNotAuthenticated(ws, ip, params) {
-
-}
 
 function handleOnConnection(ws, ip, params) {
+  const { question, user, vote_next_word, voting_round_end_time, winning_word } = params;
 
-  // if (params.auth) {
-  //   jwt.verify(params.auth, process.env.JWT_SECRET, (err, decoded) => {
-  //     if (err) {
-  //       console.log(err);
-  //       ws.send('invalid auth');
-  //     } else {
-  //       onAuthenticated(ws, ip, params);
-  //     }
-  //   });
-  // } else {
-  //   onNotAuthenticated(ws, ip, params);
-  // }
-
-
-  if (params.question) {
+  if (question) {
     if (isProduction) {
-      authVotersByIP[params.question] = authVotersByIP[params.question] || {};
+      authVotersByIP[question] = authVotersByIP[question] || {};
     } else {
-      authVoters[params.question] = authVoters[params.question] || [];
+      authVoters[question] = authVoters[question] || [];
     }
   }
 
-  if (params.start) {
-    if (isProduction) {
-      Object.values(authVotersByIP[params.question]).forEach(ws => {
-        ws.send(JSON.stringify({
-          start: true,
-          votingRoundEndTime: params.voting_round_end_time,
-        }));
-      });
-    } else {
-      // DEVELOPMENT
-      authVoters[params.question].forEach(({ ws }) => {
-        ws.send(JSON.stringify({
-          start: true,
-          votingRoundEndTime: params.voting_round_end_time,
-        }));
-      })
-    }
-
-  } else if (params.vote_next_word) {
+  if (user === 'rails-server' && vote_next_word) {
     console.log('~~~~~~~~~~~NEXT VOTING ROUND~~~~~~~~~~~~~');
 
     if (isProduction) {
-      Object.values(authVotersByIP[params.question]).forEach(ws => {
+      Object.values(authVotersByIP[question]).forEach(ws => {
         ws.send(JSON.stringify({
-          winningWord: params.winning_word,
-          votingRoundEndTime: params.voting_round_end_time,
+          winningWord: winning_word,
+          votingRoundEndTime: voting_round_end_time,
         }));
       });
     } else {
       // DEVELOPMENT
-      authVoters[params.question].forEach(({ ws }) => {
+      authVoters[question].forEach(({ ws }) => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ winningWord: params.winning_word, votingRoundEndTime: params.voting_round_end_time}));
+          ws.send(JSON.stringify({ winningWord: winning_word, votingRoundEndTime: voting_round_end_time}));
           return true;
         } else {
           return ws.readyState === WebSocket.CONNECTING;
@@ -106,24 +65,25 @@ function handleOnConnection(ws, ip, params) {
       });
     }
 
-    if (params.winning_word === '(complete-answer)') {
-      // delete authVotersByIP[params.question] // TODO: Clear question?
+    if (winning_word === '(complete-answer)') {
+      // delete authVotersByIP[question] // TODO: Clear question?
     }
 
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
 
     if (isProduction) {
-      authVotersByIP[params.question][ip] = ws; // use user id?
+      authVotersByIP[question][ip] = ws; // use user id?
     } else {
       // DEVELOPMENT
-      authVoters[params.question].push({ ws, ip });
+      authVoters[question] = authVoters[question].filter(wsObj => wsObj.ip !== ip);
+      authVoters[question].push({ ws, ip });
     }
 
-    let activeHive = isProduction ? Object.values(authVotersByIP[params.question] || {}) : (authVoters[params.question] || []).map(x => x.ws);
+    let activeHive = isProduction ? Object.values(authVotersByIP[question] || {}) : (authVoters[question] || []).map(x => x.ws);
     const activeHiveCount = activeHive.filter(ws => ws && ws.readyState === WebSocket.OPEN).length;
 
-    const setName = `${params.question}-scores`;
+    const setName = `${question}-scores`;
     redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
       if (err) console.log(err);
       ws.send(JSON.stringify({
@@ -139,23 +99,24 @@ wss.on('connection', function connection(ws, req) {
   const params = qs.parse(req.url.slice(2));
 
   if (params.auth) {
-    jwt.verify(params.auth, process.env.JWT_SECRET, (err, decoded) => {
+    jwt.verify(params.auth, JWT_SECRET, (err, decoded) => {
       if (err) {
         console.log(err);
-        ws.send('invalid auth');
+        ws.send('invalid auth'); // TODO: have frontend respond to this
       } else {
-        onAuthenticated(ws, ip, params);
-        ws.on('message', function incoming(data) {
-          handleNewVoteMessage(ws, data)
-        });
+        if (decoded && decoded.user_id === params.user) {
+          // only handle messages from properly authenticated users
+          ws.on('message', function incoming(data) {
+            // TODO: don't register vote til after startTime
+            handleNewVoteMessage(ws, data)
+          });
+        }
+
       }
     });
-  } else {
-    onNotAuthenticated(ws, ip, params);
+
+    handleOnConnection(ws, ip, params);
   }
-
-  handleOnConnection(ws, ip, params);
-
 
   if (params.question) {
     ws.on('close', (ip => {
@@ -168,10 +129,6 @@ wss.on('connection', function connection(ws, req) {
             delete authVotersByIP[params.question];
           }
         }
-
-        // if (authVoters[params.question]) {
-        //   authVoters[params.question] = authVoters[params.question].filter(x => x.ip !== ip);
-        // }
       }
     })(ip));
   }
@@ -195,7 +152,6 @@ server.on('upgrade', function upgrade(request, socket, head) {
     wss.handleUpgrade(request, socket, head, function done(ws) {
       wss.emit('connection', ws, request);
     });
-  // });
 });
 
 server.listen(PORT);
