@@ -66,7 +66,7 @@ function handleOnConnection(ws, ip, params) {
     }
 
     if (winning_word === '(complete-answer)') {
-      // delete authVotersByIP[question] // TODO: Clear question?
+      delete authVotersByIP[question]; // TODO: Clear question?
     }
 
   } else {
@@ -83,8 +83,8 @@ function handleOnConnection(ws, ip, params) {
     let activeHive = isProduction ? Object.values(authVotersByIP[question] || {}) : (authVoters[question] || []).map(x => x.ws);
     const activeHiveCount = activeHive.filter(ws => ws && ws.readyState === WebSocket.OPEN).length;
 
-    const setName = `${question}-scores`;
-    redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
+    const sortedSetKey = `${question}-scores`;
+    redisClient.zrevrangebyscore(sortedSetKey, '+inf', 1, 'withscores', (err, scores) => {
       if (err) console.log(err);
       ws.send(JSON.stringify({
         activeHiveCount,
@@ -108,7 +108,7 @@ wss.on('connection', function connection(ws, req) {
           // only handle messages from properly authenticated users
           ws.on('message', function incoming(data) {
             // TODO: don't register vote til after startTime
-            handleNewVoteMessage(ws, data)
+            handleNewVoteMessage(ws, data, params.user)
           });
         }
 
@@ -134,12 +134,7 @@ wss.on('connection', function connection(ws, req) {
   }
 });
 
-// function authenticate(params, cb) {
-//   cb(null);
-// }
-
 server.on('upgrade', function upgrade(request, socket, head) {
-  // This function is not defined on purpose. Implement it with your own logic.
   const qsParams = qs.parse(request.url.slice(2));
 
   // authenticate(qsParams, err => {
@@ -156,22 +151,47 @@ server.on('upgrade', function upgrade(request, socket, head) {
 
 server.listen(PORT);
 
-function handleNewVoteMessage(ws, strMsg) {
-  const [player, word, questionId] = strMsg.split(' ');
+function getScoresAndPublish(questionId) {
+  const sortedSetKey = `${questionId}-scores`;
 
-  if (!player || !questionId) { return }
+  redisClient.zrevrangebyscore(sortedSetKey, '+inf', 1, 'withscores', (err, scores) => {
+    if (err) { console.log(err) }
 
-  const playerChoiceKey = `${questionId}-${player}`;
+    const websockets = isProduction ? Object.values(authVotersByIP[questionId] || {}) : authVoters[questionId].map(x => x.ws);
+    const activeHiveCount = (websockets || []).length;
 
-  // if (!word) {
-  //   // if voting for a null word, delete player
-  //   redisClient.del(playerChoiceKey);
-  //   return;
-  // }
+    (websockets || []).forEach(ws => {
+      ws.send(JSON.stringify({
+        activeHiveCount,
+        scores,
+      }));
+    });
 
-  const setName = `${questionId}-scores`;
+  });
+}
 
-  // get current
+// TODO: Create separate throttledScoreBroadcast function per questionId
+const throttledScoreBroadcast = _.throttle(getScoresAndPublish, 250);
+
+function handleNewVoteMessage(ws, strMsg, userId) {
+  const [questionId, word] = strMsg.split(' ');
+
+  if (!questionId) { return }
+
+  const sortedSetKey = `${questionId}-scores`;
+  const playerChoiceKey = `${questionId}-${userId}`;
+
+  if (!word) {
+    // if voting for a null word, delete player
+    redisClient.del(playerChoiceKey);
+    throttledScoreBroadcast(questionId);
+    return;
+  }
+
+  // word is too big
+  if (word && word.length > 35) { return }
+
+  // get current word vote and decrement it
   redisClient.get(playerChoiceKey, decOldVote);
 
   function decOldVote(e, wordToDec) {
@@ -179,43 +199,26 @@ function handleNewVoteMessage(ws, strMsg) {
 
     if (wordToDec) {
       console.log(`decrementing vote for ${wordToDec}`)
-      redisClient.zincrby(setName, -1, wordToDec, incNewVote);
+      redisClient.zincrby(sortedSetKey, -1, wordToDec, incNewVote);
     } else {
       incNewVote();
     }
   }
 
-  const throttledScoreBroadcast = _.throttle(getScoresAndPublish, 250);
-
   function incNewVote() {
-    if (word && word !== '<BLANK_VOTE>') {
-      console.log(`incrementing ${word}`)
-      redisClient.zincrby(setName, 1, word, setNewVote);
-    } else {
-      console.log(`blank vote deleting player`)
-      redisClient.del(playerChoiceKey);
-      throttledScoreBroadcast();
-    }
+    // if (word) {
+      const sanitizedWord = word === '(complete-answer)' ? word : word.replace(/[^a-zA-Z]/g, '').toLowerCase();
+      console.log(`incrementing ${sanitizedWord}`);
+      redisClient.zincrby(sortedSetKey, 1, sanitizedWord, setNewVote);
+    // } else {
+    //   console.log(`blank vote deleting player`)
+    //   redisClient.del(playerChoiceKey);
+    //   throttledScoreBroadcast(questionId);
+    // }
   }
 
   function setNewVote() {
-    redisClient.set(`${questionId}-${player}`, word, throttledScoreBroadcast);
+    redisClient.set(playerChoiceKey, word, () => throttledScoreBroadcast(questionId));
   }
 
-  function getScoresAndPublish() {
-    redisClient.zrevrangebyscore(setName, '+inf', 1, 'withscores', (err, scores) => {
-      if (err) { console.log(err) }
-
-      const websockets = isProduction ? Object.values(authVotersByIP[questionId] || {}) : authVoters[questionId].map(x => x.ws);
-      const activeHiveCount = (websockets || []).length;
-
-      (websockets || []).forEach(ws => {
-        ws.send(JSON.stringify({
-          activeHiveCount,
-          scores,
-        }));
-      });
-
-    });
-  }
 }
