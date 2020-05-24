@@ -6,7 +6,7 @@ const jwt = require('jsonwebtoken');
 const _ = require('lodash');
 
 // const isProduction = process.env.NODE_ENV === 'production';
-const isProduction = false;
+
 const PORT = process.env.PORT || 9001;
 // Should be equal to value of `Rails.application.secrets.secret_key_base` from hivemind-rails
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -20,77 +20,44 @@ const redisClient = redis.createClient(redisClientOptions);
 const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
 
-// Development
-const authVoters = {};
+// const authVoters = {};
+// const watchersByIP = {};
 
-const authVotersByIP = {};
-/*
-  authVotersByIP = {
-    <QUESTION_ID>: {
-      <IP>: <WS>
-    }
-  }
-*/
+const wsByQuestion = {};
+let activeHiveCount = 0;
 
-function handleOnConnection(ws, ip, params) {
+
+function handleOnConnection(ws, params) {
   const { question, user, vote_next_word, voting_round_end_time, winning_word } = params;
 
   if (question) {
-    if (isProduction) {
-      authVotersByIP[question] = authVotersByIP[question] || {};
-    } else {
-      authVoters[question] = authVoters[question] || [];
-    }
+    wsByQuestion[question] = wsByQuestion[question] || [];
   }
 
   if (user === 'rails-server' && vote_next_word) {
     console.log('~~~~~~~~~~~NEXT VOTING ROUND~~~~~~~~~~~~~');
 
-    if (isProduction) {
-      Object.values(authVotersByIP[question]).forEach(ws => {
+    wsByQuestion[question] = wsByQuestion[question].filter(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           winningWord: winning_word,
           votingRoundEndTime: voting_round_end_time,
         }));
-      });
-    } else {
-      // DEVELOPMENT
-      authVoters[question].forEach(({ ws }) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ winningWord: winning_word, votingRoundEndTime: voting_round_end_time}));
-          return true;
-        } else {
-          return ws.readyState === WebSocket.CONNECTING;
-        }
-      });
-    }
+        return true;
+      } else {
+        return ws.readyState === WebSocket.CONNECTING;
+      }
+    });
 
     if (winning_word === '(complete-answer)') {
-      delete authVotersByIP[question]; // TODO: Clear question?
+      delete wsByQuestion[question];
     }
 
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
-
-    if (isProduction) {
-      authVotersByIP[question][ip] = ws; // use user id?
-    } else {
-      // DEVELOPMENT
-      authVoters[question] = authVoters[question].filter(wsObj => wsObj.ip !== ip);
-      authVoters[question].push({ ws, ip });
-    }
-
-    let activeHive = isProduction ? Object.values(authVotersByIP[question] || {}) : (authVoters[question] || []).map(x => x.ws);
-    const activeHiveCount = activeHive.filter(ws => ws && ws.readyState === WebSocket.OPEN).length;
-
-    const sortedSetKey = `${question}-scores`;
-    redisClient.zrevrangebyscore(sortedSetKey, '+inf', 1, 'withscores', (err, scores) => {
-      if (err) console.log(err);
-      ws.send(JSON.stringify({
-        activeHiveCount,
-        scores,
-      }));
-    });
+    wsByQuestion[question].push(ws);
+    // Let everyone see the new voter
+    throttledScoreBroadcast(question);
   }
 }
 
@@ -98,45 +65,48 @@ wss.on('connection', function connection(ws, req) {
   const ip = req.socket.remoteAddress;
   const params = qs.parse(req.url.slice(2));
 
-  if (params.auth) {
-    jwt.verify(params.auth, JWT_SECRET, (err, decoded) => {
-      if (err) {
-        console.log(err);
-        ws.send('invalid auth'); // TODO: have frontend respond to this
-      } else {
-        if (decoded && decoded.user_id === params.user) {
-          // only handle messages from properly authenticated users
-          ws.on('message', function incoming(data) {
-            // TODO: don't register vote til after startTime
-            handleNewVoteMessage(ws, data, params.user)
-          });
-        }
+  jwt.verify(params.auth, JWT_SECRET, (err, decoded) => {
+    if (err) {
+      console.log(err);
+      ws.send('invalid auth'); // TODO: have frontend respond to this
+    } else {
+      if (decoded && decoded.user_id === params.user) {
+        // only handle messages from properly authenticated users
+        ws.on('message', function incoming(data) {
+          // TODO: don't register vote til after startTime
+          handleNewVoteMessage(ws, data, params.user)
+        });
 
+        activeHiveCount++;
+
+        ws.on('close', () => {
+          activeHiveCount--;
+        });
       }
-    });
+    }
+  });
 
-    handleOnConnection(ws, ip, params);
-  }
+  handleOnConnection(ws, params);
 
   if (params.question) {
-    ws.on('close', (ip => {
-      return function onClose() {
-        if (authVotersByIP[params.question]) {
-          // remove ws from memory
-          delete authVotersByIP[params.question][ip];
-          if (!Object.keys(authVotersByIP[params.question]).length) {
-            // delete empty list
-            delete authVotersByIP[params.question];
-          }
+    ws.on('close', () => {
+      if (wsByQuestion[params.question]) {
+        // remove ws from wsByQuestion[params.question]
+        wsByQuestion[params.question] = wsByQuestion[params.question].filter(w => w !== ws)
+
+        if (!wsByQuestion[params.question].length) {
+          // delete empty list
+          delete wsByQuestion[params.question];
         }
       }
-    })(ip));
+    });
   }
 });
 
 server.on('upgrade', function upgrade(request, socket, head) {
   const qsParams = qs.parse(request.url.slice(2));
 
+  // TODO: do we wanna use this pattern instead?
   // authenticate(qsParams, err => {
     // if (err) {
     //   socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -157,8 +127,7 @@ function getScoresAndPublish(questionId) {
   redisClient.zrevrangebyscore(sortedSetKey, '+inf', 1, 'withscores', (err, scores) => {
     if (err) { console.log(err) }
 
-    const websockets = isProduction ? Object.values(authVotersByIP[questionId] || {}) : authVoters[questionId].map(x => x.ws);
-    const activeHiveCount = (websockets || []).length;
+    const websockets = wsByQuestion[questionId];
 
     (websockets || []).forEach(ws => {
       ws.send(JSON.stringify({
