@@ -8,6 +8,7 @@ const _ = require('lodash');
 // const isProduction = process.env.NODE_ENV === 'production';
 
 const PORT = process.env.PORT || 9001;
+
 // Should be equal to value of `Rails.application.secrets.secret_key_base` from hivemind-rails
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -20,8 +21,12 @@ const redisClient = redis.createClient(redisClientOptions);
 const server = http.createServer();
 const wss = new WebSocket.Server({ noServer: true });
 
-// const authVoters = {};
-// const watchersByIP = {};
+
+// NOTE: The current implementation of this server allows multiple WS connections per user/IP
+// We may want to limit to 1
+// const wsConnectionsByUserID = {};
+// const wsConnectionsByIP = {};
+
 
 const wsByQuestion = {};
 let activeHiveCount = 0;
@@ -56,7 +61,7 @@ function handleOnConnection(ws, params) {
   } else {
     console.log('~~~~~~~~~~~SUBSCRIBE VOTER~~~~~~~~~~~~~');
     wsByQuestion[question].push(ws);
-    // Let everyone see the new voter
+    // Let everyone see the new voter count
     throttledScoreBroadcast(question);
   }
 }
@@ -139,7 +144,8 @@ function getScoresAndPublish(questionId) {
   });
 }
 
-// TODO: Create separate throttledScoreBroadcast function per questionId
+// NOTE: If we wanna do more than one question at a time,
+// we need a separate throttledScoreBroadcast function per questionId
 const throttledScoreBroadcast = _.throttle(getScoresAndPublish, 250);
 
 function handleNewVoteMessage(ws, strMsg, userId) {
@@ -175,15 +181,9 @@ function handleNewVoteMessage(ws, strMsg, userId) {
   }
 
   function incNewVote() {
-    // if (word) {
-      const sanitizedWord = word === '(complete-answer)' ? word : word.replace(/[^a-zA-Z]/g, '').toLowerCase();
-      console.log(`incrementing ${sanitizedWord}`);
-      redisClient.zincrby(sortedSetKey, 1, sanitizedWord, setNewVote);
-    // } else {
-    //   console.log(`blank vote deleting player`)
-    //   redisClient.del(playerChoiceKey);
-    //   throttledScoreBroadcast(questionId);
-    // }
+    const sanitizedWord = word === '(complete-answer)' ? word : word.replace(/[^a-zA-Z]/g, '').toLowerCase();
+    console.log(`incrementing ${sanitizedWord}`);
+    redisClient.zincrby(sortedSetKey, 1, sanitizedWord, setNewVote);
   }
 
   function setNewVote() {
