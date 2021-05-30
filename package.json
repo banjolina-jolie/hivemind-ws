@@ -9,7 +9,7 @@
     "jsonwebtoken": "^8.5.1",
     "lodash": "^4.17.15",
     "redis": "^3.0.2",
-    "ws": "^7.2.5"
+    "ws": "^7.4.6"
   },
   "scripts": {
     "start": "node websocket-server.js"
